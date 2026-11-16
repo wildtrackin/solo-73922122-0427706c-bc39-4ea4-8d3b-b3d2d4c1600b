@@ -75,8 +75,10 @@ for p in list_parquet_files():
 print("阶段3b：重启后接续完成，卷内无 S001 残留；files_removed =", w["files_removed"])
 
 # 下载恢复可用且只剩 S002
+import os
 import pyarrow.parquet as pq
-row, path = services.get_downloadable_batch(1)
+row, fd, path = services.open_batch_download(1)
+os.close(fd)
 t = pq.read_table(path)
 assert t.column("subject_id").to_pylist() == ["S002"]
 print("阶段3c：批次下载恢复，内容 =", t.to_pydict())

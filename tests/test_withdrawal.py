@@ -118,9 +118,8 @@ def test_started_download_survives_rewrite(client, monkeypatch):
     csv_upload(client, [("S001", "2026-01-01", 1), ("S002", "2026-01-01", 2)])
     client.post("/api/withdrawals", json={"subject_id": "S001"})
 
-    # 先取得当前文件句柄（模拟下载已经开始、正在传输）
-    row, path = services.get_downloadable_batch(1)
-    fd = os.open(path, os.O_RDONLY)
+    # 先取得当前文件句柄（模拟下载已经放行、正在传输）
+    row, fd, path = services.open_batch_download(1)
     try:
         original = services.rewrite_without_subject
 

@@ -1,15 +1,15 @@
 """FastAPI 入口：HTTP 路由、后台清理 worker、单页前端。"""
 from __future__ import annotations
 
+import os
 import threading
-import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import config, db, services
+from .downloads import build_download_response
 from .parquet_store import ValidationError, parse_csv
 
 _worker_stop = threading.Event()
@@ -87,15 +87,21 @@ def get_batches() -> dict:
     return {"batches": services.list_batches()}
 
 
-@app.get("/api/batches/{batch_id}/download")
-def download_batch(batch_id: int) -> FileResponse:
-    row, path = services.get_downloadable_batch(batch_id)
-    # FileResponse 打开文件句柄后，重写/删除不影响已经开始的下载
-    return FileResponse(
-        path,
-        media_type=config.PARQUET_MEDIA_TYPE,
-        filename=f"batch-{batch_id:08d}.parquet",
-    )
+@app.api_route("/api/batches/{batch_id}/download", methods=["GET", "HEAD"])
+def download_batch(batch_id: int, request: Request) -> Response:
+    # 准入即打开文件句柄：响应头发出前句柄已持有，撤回重写随后删除旧文件
+    # 不影响本次下载；响应长度与 Range 区间均取自该句柄的 fstat，与正文一致
+    row, fd, path = services.open_batch_download(batch_id)
+    try:
+        return build_download_response(
+            request,
+            fd,
+            filename=f"batch-{batch_id:08d}.parquet",
+            media_type=config.PARQUET_MEDIA_TYPE,
+        )
+    except Exception:
+        os.close(fd)  # 响应构造失败也必须释放读取资源
+        raise
 
 
 @app.post("/api/withdrawals")

@@ -338,7 +338,8 @@ def _final_sweep(subject_id: str) -> int:
 
 # ---------------------------------------------------------------- 下载与列表
 
-def get_downloadable_batch(batch_id: int):
+def _admit_download(batch_id: int):
+    """下载准入：仅 published 批次放行；重写中/失败的批次一律停供（409）。"""
     row = db.query_one("SELECT * FROM batches WHERE id=?", (batch_id,))
     if row is None:
         raise ServiceError(f"批次 {batch_id} 不存在", status_code=404)
@@ -346,11 +347,33 @@ def get_downloadable_batch(batch_id: int):
         raise ServiceError(
             f"批次 {batch_id} 正在撤回重写，暂时禁止下载", status_code=409
         )
-    path = Path(row["current_path"])
-    if not path.exists():
-        # 绝不允许把丢失/损坏的文件当成功返回
+    if not row["current_path"]:
         raise ServiceError(f"批次 {batch_id} 的数据文件缺失", status_code=500)
-    return row, path
+    return row, row["current_path"]
+
+
+def open_batch_download(batch_id: int):
+    """准入并打开批次当前版本文件，返回 (row, fd, path)。
+
+    句柄在响应头发出前打开：此后撤回重写 unlink 旧文件不影响本次下载，
+    成功响应必完整交付放行时版本（POSIX：已打开句柄不受 unlink 影响，
+    因此无需为下载持锁，慢下载不会拖住撤回、旧路径清理或其他批次请求）。
+
+    若恰撞上重写切换窗口（准入后旧文件刚被删除），重读准入状态：
+    路径已切换则用新版本重试；状态翻转为非 published 则按停供处理（409）；
+    路径未变而文件仍缺失则是真实损坏，报 500，绝不把缺失文件当成功返回。
+    """
+    row, path = _admit_download(batch_id)
+    while True:
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except FileNotFoundError:
+            new_row, new_path = _admit_download(batch_id)
+            if new_path == path:
+                raise ServiceError(f"批次 {batch_id} 的数据文件缺失", status_code=500)
+            row, path = new_row, new_path
+            continue
+        return row, fd, path
 
 
 def list_batches() -> list[dict]:

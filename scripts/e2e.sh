@@ -97,6 +97,50 @@ PY
 check_batch "${BASE1}" "${BATCH_A}" "S002"
 check_batch "${BASE2}" "${BATCH_B}" "S003"
 
+# 5b. Range 与长度一致性：HEAD 取长度，区间下载逐字节比对，越界 416
+SIZE=$(curl -sfI "${BASE1}/api/batches/${BATCH_A}/download" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength:[[:space:]]*//p')
+[[ "${SIZE}" =~ ^[0-9]+$ ]] || fail "HEAD 未返回 Content-Length"
+curl -sf "${BASE1}/api/batches/${BATCH_A}/download" -o "${E2E_DIR}/full.parquet"
+[[ $(stat -c%s "${E2E_DIR}/full.parquet") == "${SIZE}" ]] || fail "全量下载长度与 HEAD 不一致"
+code=$(curl -sf -o "${E2E_DIR}/part.bin" -w '%{http_code}' -r 10-29 "${BASE1}/api/batches/${BATCH_A}/download")
+[[ "${code}" == "206" ]] || fail "Range 请求期望 206，实际 ${code}"
+[[ $(stat -c%s "${E2E_DIR}/part.bin") == "20" ]] || fail "Range 返回长度不为 20"
+head -c 30 "${E2E_DIR}/full.parquet" | tail -c 20 | cmp - "${E2E_DIR}/part.bin" || fail "Range 内容与全量对应区间不一致"
+code=$(curl -s -o /dev/null -w '%{http_code}' -r "$((SIZE + 10))-" "${BASE1}/api/batches/${BATCH_A}/download")
+[[ "${code}" == "416" ]] || fail "越界 Range 期望 416，实际 ${code}"
+echo "== Range 区间与正文一致（206 逐字节比对、416 校验通过）"
+
+# 5c. 跨实例交错压测：实例2 撤回重写期间，实例1 连续下载，
+#     每次结果只能是 200 且长度与响应头一致，或 409；绝不能 500/空正文
+printf 'subject_id,date,steps\nS005,2026-11-05,1\nS006,2026-11-05,2\n' > "${E2E_DIR}/e.csv"
+R=$(curl -sf -F "file=@${E2E_DIR}/e.csv" "${BASE1}/api/imports")
+BATCH_E=$(printf '%s' "${R}" | sed 's/.*"batch_id":\([0-9]*\).*/\1/')
+( for i in $(seq 1 30); do
+    code=$(curl -s -D "${E2E_DIR}/h.$i" -o "${E2E_DIR}/d.$i" -w '%{http_code}' \
+      "${BASE1}/api/batches/${BATCH_E}/download")
+    echo "${code}" > "${E2E_DIR}/c.$i"
+  done ) &
+LOOP_PID=$!
+curl -sf -H 'Content-Type: application/json' -d '{"subject_id":"S005"}' "${BASE2}/api/withdrawals" >/dev/null
+wait "${LOOP_PID}"
+for i in $(seq 1 30); do
+  code=$(cat "${E2E_DIR}/c.$i")
+  if [[ "${code}" == "200" ]]; then
+    declared=$(tr -d '\r' < "${E2E_DIR}/h.$i" | sed -n 's/^[Cc]ontent-[Ll]ength:[[:space:]]*//p')
+    actual=$(stat -c%s "${E2E_DIR}/d.$i")
+    [[ -n "${declared}" && "${declared}" == "${actual}" ]] \
+      || fail "交错下载长度不一致：声明 ${declared} 实际 ${actual}"
+  elif [[ "${code}" != "409" ]]; then
+    fail "交错下载出现非预期状态 ${code}（只能是 200完整 或 409）"
+  fi
+done
+n=0
+until curl -sf "${BASE1}/api/withdrawals/S005" | grep -q '"status":"completed"'; do
+  n=$((n + 1)); [[ ${n} -gt 50 ]] && fail "S005 撤回未在预期时间内完成"
+  sleep 0.3
+done
+echo "== 撤回×下载跨实例交错压测通过（30 次均为 200完整 或 409，无断流）"
+
 # 6. 撤回后两个实例都永久拒收含 S001 的整批
 printf 'subject_id,date,steps\nS001,2026-12-01,1\nS009,2026-12-01,2\n' > "${E2E_DIR}/c.csv"
 for base in "${BASE1}" "${BASE2}"; do
