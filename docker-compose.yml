@@ -1,0 +1,29 @@
+# 两个应用实例共用同一命名卷 stepdata（SQLite + Parquet + 跨进程锁）。
+# 浏览器访问 http://localhost:8001 或 http://localhost:8002 均可导入/撤回/下载。
+services:
+  app1:
+    build: .
+    image: step-withdrawal-app:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - stepdata:/data
+    restart: unless-stopped
+    environment:
+      STEP_DATA_DIR: /data
+
+  app2:
+    image: step-withdrawal-app:latest
+    build: .
+    depends_on:
+      - app1
+    ports:
+      - "8002:8000"
+    volumes:
+      - stepdata:/data
+    restart: unless-stopped
+    environment:
+      STEP_DATA_DIR: /data
+
+volumes:
+  stepdata:
